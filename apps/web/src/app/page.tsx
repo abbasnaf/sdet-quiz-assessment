@@ -1,7 +1,7 @@
 "use client";
 
 import { Trophy } from "lucide-react";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -24,21 +24,72 @@ export default function HomePage() {
   const [answers, setAnswers] = useState(["A", "C", "B", "D", "A"]);
   const [leaderboard, setLeaderboard] = useState<LeaderboardPlayer[]>([]);
   const [status, setStatus] = useState("Ready to submit a quiz.");
+  
+  const [pollingOn, setPolling] = useState(false);
+  const pollCountRef = useRef(0);
 
   async function loadLeaderboard() {
     const response = await fetch(`${apiUrl}/api/leaderboard`, { cache: "no-store" });
     const data = (await response.json()) as LeaderboardResponse;
+
     setLeaderboard(data.players);
   }
 
+/*
+ //Original fetch
   useEffect(() => {
     void loadLeaderboard();
   }, []);
+*/
+
+
+//  using the continuous polling, seems better approach for some scale of application
+
+  useEffect(() => {
+    void loadLeaderboard();
+
+    const interval = setInterval(() => {
+      void loadLeaderboard();
+    }, 2000);
+
+  return () => clearInterval(interval);
+}, []);
+
+
+
+/* used polling which happens 5 times from the click of the submit button, saves resource; should go ahead with websockets
+  useEffect(() => {
+  void loadLeaderboard();
+
+  //if polling not on do not establish the interval
+  if (!pollingOn) return;
+
+  pollCountRef.current = 0;
+
+  const interval = setInterval(() => {
+    void loadLeaderboard();
+    pollCountRef.current += 1;
+
+    if (pollCountRef.current >= 5) {
+      clearInterval(interval);
+      setPolling(false);
+    }
+  }, 1000);
+
+  return () => clearInterval(interval);
+}, [pollingOn]);
+*/
+
 
   async function submitQuiz(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setStatus("Submission accepted. Evaluation is running asynchronously.");
 
+
+// added polling
+//   setPolling(true);
+
+ 
     await fetch(`${apiUrl}/api/quiz/submit`, {
       method: "POST",
       headers: { "content-type": "application/json" },

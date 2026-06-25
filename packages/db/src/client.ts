@@ -27,6 +27,9 @@ export function createDatabase() {
 
   const sqlite = new Database(path);
   sqlite.run("PRAGMA foreign_keys = ON");
+  //added Wal mode for concurrent read while write is happening
+  sqlite.run("PRAGMA journal_mode = WAL");
+  sqlite.run("PRAGMA busy_timeout = 5000");
 
   return drizzle(sqlite, { schema });
 }

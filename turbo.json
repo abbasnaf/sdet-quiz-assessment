@@ -18,7 +18,8 @@
       "outputs": ["playwright-report/**", "test-results/**"]
     },
     "test:perf": {
-      "inputs": ["package.json"],
+	  "cache": false,
+	  "inputs": ["k6/**/*.js", "k6/**/*.ts", ".env*"],
       "outputs": ["dist/perf-results.json"]
     },
     "lint": {

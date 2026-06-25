@@ -6,7 +6,8 @@ export const options = {
   duration: "20s",
   thresholds: {
     http_req_failed: ["rate<0.05"],
-    http_req_duration: ["p(95)<500"]
+	http_req_duration: ["p(95)<200"]
+
   }
 };
 
@@ -23,6 +24,17 @@ export default function () {
   const submit = http.post(`${apiUrl}/api/quiz/submit`, payload, {
     headers: { "content-type": "application/json" }
   });
+
+/* for debugging the locking contention
+check(submit, {
+  "submission accepted": (response) => {
+    if (response.status !== 202) {
+      console.log(`FAILED: ${response.status} - ${response.body}`);
+    }
+    return response.status === 202;
+  }
+});
+*/
 
   check(submit, {
     "submission accepted": (response) => response.status === 202
