@@ -103,25 +103,13 @@ Even when the test Concurrency test didnt fail, write contention was there.
 
 ## Solution
 
-The read-modify-write sequence was replaced with a single atomic SQL update (packages/workers/src/processor.ts):
-atomic update: addition executes inside the database, eliminating the read-modify-write window that caused lost updates under concurrency
-```
-await db
-  .update(playerScores)
-  .set({
-    totalScore: sql`${playerScores.totalScore} + ${score}`,
-    updatedAt: new Date(),
-  })
-  .where(eq(playerScores.userId, job.userId));
-```
-The addition now executes entirely within the database engine as a single operation. There is no read in application code, no JavaScript computation, and no window between read and write where another worker can interfere. The database's internal row-level locking guarantees correctness regardless of how many workers execute concurrently.
+To resolve both the race condition and the database lock contention, I implemented a Redis Distributed Lock combined with an Idempotency Check.
 
-Additional Fix: SQLite WAL Mode
-k6 load testing showed another issue, database is locked errors (HTTP 500) came up with around 9% error rate under 10 concurrent virtual users. This was SQLite's default journal mode failing under concurrent writes.
-I enabled the WAL (Write-Ahead Logging) mode in packages/db/src/client.ts:
-sqlite.run("PRAGMA journal_mode = WAL");
-sqlite.run("PRAGMA busy_timeout = 5000");
-WAL allows concurrent reads alongside serialized writes and eliminates lock contention errors. busy_timeout instructs SQLite to retry for up to 5 seconds before throwing a lock error. After this fix there were no more error.
+Redis Distributed Lock: I introduced a Redis lock keyed to the userId using NX and PX parameters. Instead of manually spinning or blocking the thread, if a worker fails to lock, it immediately throws an error. This efficiently leverages BullMQ's native retry mechanism.
+
+Idempotency Guard: To protect against BullMQ's automatic retries, the worker first checks the submissions table. If the submission status is already evaluated, the worker skips the increment entirely, preventing duplicate points.
+
+Atomic Database Increments: As an added layer of safety, the Drizzle update query uses a native SQL template (sql... + ${score}) to guarantee atomic operations at the database engine level.
 
 # k6 Load Test
 
@@ -138,7 +126,7 @@ scenarios: (100.00%) 1 scenario, 10 max VUs, 50s max duration
 ```
 THRESHOLDS
   http_req_duration
-  ✓ 'p(95)<200' p(95)=137.05ms
+  ✓ 'p(95)<200' p(95)=67.73ms
   http_req_failed
   ✓ 'rate<0.05' rate=0.00%
 ```

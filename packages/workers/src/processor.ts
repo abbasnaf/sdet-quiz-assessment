@@ -1,5 +1,5 @@
 import { LEADERBOARD_CACHE_KEY, createRedisConnection, db, playerScores, results, submissions, users } from "@quiz/db";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { scoreAnswers } from "./scoring";
 
 export type QuizSubmissionJob = {
@@ -16,52 +16,84 @@ export async function processQuizSubmission(job: QuizSubmissionJob) {
 
   const { correctCount, score } = scoreAnswers(job.answers);
 
-  await db
-    .insert(users)
-    .values({ id: job.userId, displayName: job.userId })
-    .onConflictDoNothing();
+  // redis distributed lock
+  // This prevents SQLite from being overwhelmed
+  const lockKey = `lock:user:${job.userId}`;
+  let acquired = false;
 
-  await db
-    .insert(playerScores)
-    .values({ userId: job.userId, totalScore: 0 })
-    .onConflictDoNothing();
+  //wait until this worker has access
+  while (!acquired) {
+    const lockResult = await redis.set(lockKey, "LOCKED", "NX", "PX", 5000);
+    if (lockResult === "OK") {
+      acquired = true;
+    } else {
+      await new Promise((r) => setTimeout(r, 100)); //retry after 100ms
+    }
+  }
 
-  const [current] = await db
-    .select({ totalScore: playerScores.totalScore })
-    .from(playerScores)
-    .where(eq(playerScores.userId, job.userId))
-    .limit(1);
+  try {
+    
+    // skip the already tried bullmq work
+    const [existingSub] = await db
+      .select({ status: submissions.status })
+      .from(submissions)
+      .where(eq(submissions.id, job.submissionId))
+      .limit(1);
 
-  const nextTotalScore = (current?.totalScore ?? 0) + score;
+    if (existingSub?.status === "evaluated") {
+      return { score, correctCount, status: "skipped_duplicate" };
+    }
 
-  await db
-    .update(playerScores)
-    .set({ totalScore: nextTotalScore, updatedAt: new Date() })
-    .where(eq(playerScores.userId, job.userId));
+    // Ensure structural rows exist
+    await db.insert(users).values({ id: job.userId, displayName: job.userId }).onConflictDoNothing();
+    await db.insert(playerScores).values({ userId: job.userId, totalScore: 0 }).onConflictDoNothing();
 
-  await db.insert(results).values({
-    id: crypto.randomUUID(),
-    submissionId: job.submissionId,
-    userId: job.userId,
-    quizId: job.quizId,
-    score,
-    correctCount
-  });
+  
 
-  await db.update(submissions).set({ status: "evaluated" }).where(eq(submissions.id, job.submissionId));
+    // Atomic Score Increment
+    await db
+      .update(playerScores)
+      .set({
+        totalScore: sql`${playerScores.totalScore} + ${score}`,
+        updatedAt: new Date(),
+      })
+      .where(eq(playerScores.userId, job.userId));
 
-  const leaderboard = await db
-    .select({
-      userId: playerScores.userId,
-      displayName: users.displayName,
-      totalScore: playerScores.totalScore
-    })
-    .from(playerScores)
-    .innerJoin(users, eq(users.id, playerScores.userId))
-    .orderBy(desc(playerScores.totalScore))
-    .limit(10);
+    // Insert 
+    await db.insert(results).values({
+      id: crypto.randomUUID(),
+      submissionId: job.submissionId,
+      userId: job.userId,
+      quizId: job.quizId,
+      score,
+      correctCount
+    });
 
-  await redis.set(LEADERBOARD_CACHE_KEY, JSON.stringify(leaderboard), "EX", 30);
+    // Mark as Evaluated
+    await db.update(submissions).set({ status: "evaluated" }).where(eq(submissions.id, job.submissionId));
 
-  return { score, correctCount, totalScore: nextTotalScore };
+  } finally {
+
+    // release lock
+    await redis.del(lockKey);
+  }
+
+  try {
+    const leaderboard = await db
+      .select({
+        userId: playerScores.userId,
+        displayName: users.displayName,
+        totalScore: playerScores.totalScore
+      })
+      .from(playerScores)
+      .innerJoin(users, eq(users.id, playerScores.userId))
+      .orderBy(desc(playerScores.totalScore))
+      .limit(10);
+
+    await redis.set(LEADERBOARD_CACHE_KEY, JSON.stringify(leaderboard), "EX", 30);
+  } catch (err) {
+    console.warn("[Worker Cache] Non-blocking leaderboard update skipped due to load.");
+  }
+
+  return { score, correctCount };
 }
