@@ -85,11 +85,13 @@ await db
 
 With worker concurrency set to 8, if multiple workers start processing submissions for the same user, they can execute the SELECT before any of them execute the UPDATE. Each worker reads the same old score, computes independently, and the last worker overwrites the value, discarding all other updates.
 Example with two workers running paralelly, starting score of 50:
+```
 Worker A: SELECT totalScore - 50
 Worker B: SELECT totalScore - 50
 Worker A: 50 + 50 = 100 - UPDATE SET totalScore = 100
 Worker B: 50 + 50 = 100 - UPDATE SET totalScore = 100
 Final: 100 (correct would be 150)
+```
 Reproduction Test
 A component test was authored at packages/testing/src/component/concurrency.test.ts that floods 200 concurrent submissions for the same user and asserts the final cumulative score equals the expected total (100 × 50 = 5000).
 ```
